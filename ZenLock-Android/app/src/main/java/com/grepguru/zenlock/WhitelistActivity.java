@@ -46,7 +46,7 @@ import java.util.Set;
 public class WhitelistActivity extends AppCompatActivity {
 
     // Configuration - Easy to modify
-    private static final int MAX_ADDITIONAL_APPS = 8;
+    private static final int MAX_ADDITIONAL_APPS = 50;
     
     // UI Components
     private RecyclerView recyclerView;

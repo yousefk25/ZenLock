@@ -136,6 +136,30 @@ public class AppBlockerServiceTest {
    shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1501));
    assertNotNull(shadowOf(blocker.getSystemService(NotificationManager.class)).getNotification(9999));
  }
+ @Test public void biometricPromptOverAllowedAppDoesNotFlashLock() {
+   event("example.allowed","example.allowed.MainActivity");
+   event("com.android.systemui","com.android.systemui.biometrics.AuthContainerView");
+   shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1501));
+   assertEquals(0,blocker.launches.size());
+   assertNull(shadowOf(blocker.getSystemService(NotificationManager.class)).getNotification(9999));
+ }
+ @Test public void credentialConfirmationForAllowedAppIsNotBlocked() {
+   event("example.allowed","example.allowed.MainActivity");
+   event("com.android.settings","com.android.settings.ConfirmDeviceCredentialActivity");
+   shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1501));
+   assertEquals(0,blocker.launches.size());
+ }
+ @Test public void systemComponentWithoutLauncherIsNotBlocked() {
+   android.content.pm.PackageInfo pkg = new android.content.pm.PackageInfo();
+   pkg.packageName = "com.android.documentsui";
+   pkg.applicationInfo = new android.content.pm.ApplicationInfo();
+   pkg.applicationInfo.packageName = pkg.packageName;
+   pkg.applicationInfo.flags = android.content.pm.ApplicationInfo.FLAG_SYSTEM;
+   shadowOf(blocker.getPackageManager()).installPackage(pkg);
+   event("com.android.documentsui","com.android.documentsui.picker.PickActivity");
+   shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1501));
+   assertEquals(0,blocker.launches.size());
+ }
  @Test public void customHomeResolvedByAndroidRemainsBlocked() {
    android.content.pm.ResolveInfo info=new android.content.pm.ResolveInfo();
    info.activityInfo=new android.content.pm.ActivityInfo();

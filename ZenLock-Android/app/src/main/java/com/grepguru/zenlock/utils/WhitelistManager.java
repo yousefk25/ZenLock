@@ -1,14 +1,22 @@
 package com.grepguru.zenlock.utils;
 
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.util.Log;
 import android.view.inputmethod.InputMethodInfo;
 import android.view.inputmethod.InputMethodManager;
 
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Centralized whitelist management to prevent code duplication
@@ -17,6 +25,50 @@ import java.util.Set;
 public class WhitelistManager {
     
     private static final String TAG = "WhitelistManager";
+
+    // Essential system packages that must stay reachable while a session runs.
+    // SECURITY: Settings and launchers are intentionally absent.
+    private static final Set<String> ESSENTIAL_SYSTEM_PACKAGES = new HashSet<>(Arrays.asList(
+        "com.android.systemui",           // System UI (status bar, navigation, biometric prompt)
+        "com.android.keyguard",           // System lock screen + device credential UI
+        "android",                        // Core Android system
+        "com.android.phone",              // Phone app (for emergency calls)
+        "com.android.incallui",           // In-call UI
+        "com.android.dialer",             // Dialer app
+        "com.android.emergency",          // Emergency services
+        "com.android.camera2",            // Camera (for emergency photos)
+        "com.android.camera",             // Camera (alternative)
+        "com.google.android.gms",         // Google Play Services
+        "com.google.android.gsf"          // Google Services Framework
+    ));
+
+    // System windows that sit on top of the app the user is in. They are not a
+    // foreground app change: the biometric prompt an allowed banking app waits on,
+    // a runtime permission dialog, or a keyguard challenge must never be blocked.
+    private static final Set<String> SYSTEM_SURFACE_PACKAGES = new HashSet<>(Arrays.asList(
+        "com.android.systemui",              // Status bar, notification shade, biometric prompt
+        "com.android.keyguard",              // System lock screen + credential UI
+        "android",                           // Framework dialogs hosted by system_server
+        "com.android.permissioncontroller",  // Runtime permission dialogs
+        "com.google.android.permissioncontroller",
+        "com.android.credentialmanager"      // Credential Manager / passkeys
+    ));
+
+    // Window classes that render biometric / credential confirmation on behalf of
+    // the foreground app. They are authentication UI, not the app's own window.
+    private static final String[] AUTH_UI_CLASS_MARKERS = {
+        "biometric",
+        "fingerprint",
+        "authcontainer",
+        "confirmdevicecredential",
+        "confirmlockpattern",
+        "confirmlockpassword",
+        "credential"
+    };
+
+    // Cached answers for hot-path window classification.
+    private static final Map<String, Boolean> systemWindowCache = new ConcurrentHashMap<>();
+    private static volatile Set<String> launcherPackages;
     
     /**
      * Check if an app is whitelisted (centralized logic)
@@ -40,32 +92,13 @@ public class WhitelistManager {
         if (isSecurityRisk(packageName)) {
             return false;
         }
-        
+
         // Allow essential system packages (SECURITY: Removed settings and launcher)
-        String[] essentialSystemPackages = {
-            "com.android.systemui",           // System UI (status bar, navigation, etc.)
-            "com.android.keyguard",           // System lock screen
-            "android",                        // Core Android system
-            "com.android.phone",              // Phone app (for emergency calls)
-            "com.android.incallui",           // In-call UI
-            "com.android.dialer",             // Dialer app
-            "com.android.emergency",          // Emergency services
-            "com.android.camera2",            // Camera (for emergency photos)
-            "com.android.camera",             // Camera (alternative)
-            "com.google.android.gms",         // Google Play Services
-            "com.google.android.gsf"          // Google Services Framework
-            // REMOVED: "com.android.settings" - Security risk (allows force stop)
-            // REMOVED: "com.sec.android.app.launcher" - Security risk (allows home screen access)
-            // REMOVED: All launcher packages - Security risk (allows home screen access)
-        };
-        
-        for (String systemPackage : essentialSystemPackages) {
-            if (systemPackage.equals(packageName)) {
-                Log.d(TAG, "Essential system package allowed: " + packageName);
-                return true;
-            }
+        if (ESSENTIAL_SYSTEM_PACKAGES.contains(packageName)) {
+            Log.d(TAG, "Essential system package allowed: " + packageName);
+            return true;
         }
-        
+
         // Check user whitelisted apps
         SharedPreferences preferences = context.getSharedPreferences("FocusLockPrefs", Context.MODE_PRIVATE);
         Set<String> whitelistedApps = preferences.getStringSet("whitelisted_apps", new HashSet<>());
@@ -106,32 +139,89 @@ public class WhitelistManager {
     }
 
     /**
+     * True for windows that belong to the system UI layer rather than to an app the
+     * user opened (biometric prompt, permission dialog, keyguard, notification shade).
+     */
+    public static boolean isSystemSurfaceWindow(String packageName) {
+        return packageName != null && SYSTEM_SURFACE_PACKAGES.contains(packageName);
+    }
+
+    /**
+     * Supporting UI that must never be treated as the user opening an app.
+     *
+     * System components without a launcher entry (document pickers, biometric
+     * providers, print/AOSP helper activities) are opened by the foreground app,
+     * so blocking them closes a dialog an allowed app is waiting on. That is why a
+     * banking app asking for a fingerprint used to be interrupted by ZenLock.
+     */
+    public static boolean isOverlayWindow(Context context, String packageName, String className) {
+        if (packageName == null || packageName.isEmpty()) return false;
+        if (isSystemSurfaceWindow(packageName)) return true;
+        // Settings and launchers stay blockable, except for their auth screens.
+        if (isSecurityRisk(packageName)) return isAuthWindowClass(className);
+        if (isNonBlockableSystemWindow(context, packageName)) return true;
+        return isSystemApp(context, packageName) && isAuthWindowClass(className);
+    }
+
+    /** True for system components that have no launcher entry of their own. */
+    private static boolean isNonBlockableSystemWindow(Context context, String packageName) {
+        Boolean cached = systemWindowCache.get(packageName);
+        if (cached != null) return cached;
+        boolean nonBlockable = isSystemApp(context, packageName) && !hasLauncherEntry(context, packageName);
+        systemWindowCache.put(packageName, nonBlockable);
+        return nonBlockable;
+    }
+
+    private static boolean isAuthWindowClass(String className) {
+        if (className == null || className.isEmpty()) return false;
+        String lower = className.toLowerCase(Locale.ROOT);
+        for (String marker : AUTH_UI_CLASS_MARKERS) {
+            if (lower.contains(marker)) return true;
+        }
+        return false;
+    }
+
+    private static boolean isSystemApp(Context context, String packageName) {
+        try {
+            ApplicationInfo info = context.getPackageManager().getApplicationInfo(packageName, 0);
+            return (info.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+        } catch (PackageManager.NameNotFoundException e) {
+            return false;
+        }
+    }
+
+    private static boolean hasLauncherEntry(Context context, String packageName) {
+        Set<String> cached = launcherPackages;
+        if (cached == null) {
+            Set<String> resolved = new HashSet<>();
+            try {
+                PackageManager pm = context.getPackageManager();
+                Intent intent = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+                for (ResolveInfo info : pm.queryIntentActivities(intent, 0)) {
+                    if (info.activityInfo != null) resolved.add(info.activityInfo.packageName);
+                }
+            } catch (RuntimeException e) {
+                // Assume a user-facing app on lookup failure rather than allowing it.
+                Log.w(TAG, "Launcher entry lookup failed", e);
+                return true;
+            }
+            launcherPackages = resolved;
+            cached = resolved;
+        }
+        return cached.contains(packageName);
+    }
+
+    /**
      * Get a list of all whitelisted packages for debugging
      * @param context The context
      * @return Set of all whitelisted package names
      */
     public static Set<String> getAllWhitelistedPackages(Context context) {
         Set<String> allWhitelisted = new HashSet<>();
-        
+
         // Add essential system packages
-        String[] essentialSystemPackages = {
-            "com.android.systemui",
-            "com.android.keyguard", 
-            "android",
-            "com.android.phone",
-            "com.android.incallui",
-            "com.android.dialer",
-            "com.android.emergency",
-            "com.android.camera2",
-            "com.android.camera",
-            "com.google.android.gms",
-            "com.google.android.gsf"
-        };
-        
-        for (String systemPackage : essentialSystemPackages) {
-            allWhitelisted.add(systemPackage);
-        }
-        
+        allWhitelisted.addAll(ESSENTIAL_SYSTEM_PACKAGES);
+
         // Add user whitelisted apps
         SharedPreferences preferences = context.getSharedPreferences("FocusLockPrefs", Context.MODE_PRIVATE);
         Set<String> whitelistedApps = preferences.getStringSet("whitelisted_apps", new HashSet<>());

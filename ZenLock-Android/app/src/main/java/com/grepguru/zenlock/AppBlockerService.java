@@ -157,6 +157,15 @@ public class AppBlockerService extends AccessibilityService {
         boolean launcher = LAUNCHER_PACKAGES.contains(packageName) || AppUtils.isLauncherPackage(this, packageName);
         boolean systemRecents = "com.android.systemui".equals(packageName)
                 && className.toLowerCase(java.util.Locale.ROOT).contains("recents");
+
+        // Supporting windows (the biometric prompt an allowed app is waiting on, a
+        // permission dialog, a document picker, a credential confirmation screen)
+        // overlay the app in front. They are not an app switch: blocking them closes
+        // the dialog an allowed app depends on and bounces the user to the lock screen.
+        if (!launcher && !systemRecents && WhitelistManager.isOverlayWindow(this, packageName, className)) {
+            return;
+        }
+
         boolean allowed = (launcher || systemRecents) ? allowLauncher
                 : WhitelistManager.isAppWhitelisted(this, packageName);
 
