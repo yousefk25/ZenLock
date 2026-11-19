@@ -13,13 +13,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '21'
           distribution: 'temurin'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
 
       - name: Build and Sign Playstore Release APK
         working-directory: ZenLock-Android
@@ -27,7 +24,8 @@ jobs:
           chmod +x ./gradlew
           ./gradlew assemblePlaystoreRelease
 
-          BUILD_TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          BUILD_TOOLS=$(ls -d "$SDK_DIR"/build-tools/* | sort -V | tail -n 1)
           RAW_APK=$(find app/build/outputs/apk/playstore/release -name "*.apk" | head -n 1)
 
           keytool -genkeypair -v -keystore release.keystore -alias zenlock -keyalg RSA -keysize 2048 -validity 10000 -storepass zenlockpass -keypass zenlockpass -dname "CN=ZenLock, OU=Dev, O=Personal, L=Cairo, ST=Cairo, C=EG"
@@ -39,3 +37,4 @@ jobs:
         with:
           name: ZenLock-Release-APK
           path: ZenLock-Android/app-release-signed.apk
+          
